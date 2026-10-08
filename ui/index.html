@@ -369,6 +369,20 @@
 <script>
 "use strict";
 
+// Per-process API token injected by the dashboard server at boot.
+// Sent on every /api/* call; never logged or exposed cross-origin.
+const API_TOKEN = "__CLAW_AUDIT_TOKEN__";
+
+async function api(path, opts = {}) {
+  const headers = Object.assign({ "X-Audit-Token": API_TOKEN }, opts.headers || {});
+  if (opts.body !== undefined && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
+  }
+  const res = await fetch(path, Object.assign({}, opts, { headers }));
+  if (res.status === 401) throw new Error("Dashboard session expired — reload the page.");
+  return res;
+}
+
 // ── State ─────────────────────────────────────────────────────────────────────
 let allResults   = [];
 let activeFilter = "all";
@@ -377,19 +391,19 @@ let activeTab    = "skills";
 
 // ── API ───────────────────────────────────────────────────────────────────────
 async function fetchScan() {
-  const res = await fetch("/api/scan");
+  const res = await api("/api/scan");
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
 async function fetchStats() {
-  const res = await fetch("/api/stats");
+  const res = await api("/api/stats");
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
 async function whitelistAdd(name) {
-  await fetch("/api/whitelist/add", {
+  await api("/api/whitelist/add", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
@@ -397,7 +411,7 @@ async function whitelistAdd(name) {
 }
 
 async function whitelistRemove(name) {
-  await fetch("/api/whitelist/remove", {
+  await api("/api/whitelist/remove", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
@@ -705,8 +719,19 @@ document.getElementById("search").addEventListener("input", e => {
 
 document.getElementById("btn-scan").addEventListener("click", runScan);
 
-document.getElementById("btn-export").addEventListener("click", () => {
-  window.location.href = "/api/export/csv";
+document.getElementById("btn-export").addEventListener("click", async () => {
+  try {
+    const res = await api("/api/export/csv");
+    if (!res.ok) throw new Error(await res.text());
+    const blob = await res.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `openclaw-audit-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } catch (err) {
+    document.getElementById("scan-status").textContent = `Export failed: ${err.message}`;
+  }
 });
 
 // Keyboard shortcut: R = rescan

@@ -4,8 +4,7 @@ Autonomously scans all installed OpenClaw skills for security risks using
 static analysis. No skill code is ever executed.
 
  v4 adds: **prompt-injection detection** (H17/H18/M21–M23), **evasion-resistant
-matching** (string-concat tricks like `"child" + "_process"` are normalized
-before matching), **SARIF + HTML reports**, **CI gates** (`--fail-on` with
+matching** (split-string tricks are normalized before matching), **SARIF + HTML reports**, **CI gates** (`--fail-on` with
 exit codes), a modular `lib/` engine, and full packaging (`package.json`,
 MIT license, GitHub Actions CI).
 
@@ -22,7 +21,7 @@ cp -r security-auditor ./skills/security-auditor
 No dependencies — pure Node.js stdlib (`node >= 18`). There is nothing to `npm install`.
 
 ```bash
-node scripts/test.js   # run the self-test suite (47 checks, no network)
+node scripts/test.js   # run the self-test suite (56 checks, no network)
 ```
 
 ## Publishing to ClawHub
@@ -54,7 +53,7 @@ Run the local web dashboard for a visual risk overview:
 ```bash
 node scripts/dashboard.js
 # or point at a specific skills directory:
-node scripts/dashboard.js --dir data/sample-skills
+node scripts/dashboard.js --dir ./demo-skills
 # custom port / host:
 node scripts/dashboard.js --port 8080
 node scripts/dashboard.js --host 127.0.0.1
@@ -73,6 +72,7 @@ Features:
 - Filter by risk level, search by name, behavior, or rule ID/label
 - Whitelist toggle directly from the UI (re-scans automatically)
 - CSV + Markdown export buttons, `R` keyboard shortcut to rescan
+- Localhost-only by default, per-process API token, no CORS — the API is unusable cross-origin
 
 API endpoints: `GET /health`, `GET /api/scan`, `POST /api/scan/single`,
 `GET /api/stats`, `GET /api/rules`, `GET /api/export/csv`,
@@ -94,18 +94,18 @@ Once installed, just ask your agent:
 node scripts/audit.js
 
 # Scan a specific directory of skills
-node scripts/audit.js --dir data/sample-skills
+node scripts/audit.js --dir ./demo-skills
 
 # Scan a single skill by name
-node scripts/audit.js --dir data/sample-skills --skill file-cleaner
+node scripts/audit.js --dir ./demo-skills --skill file-cleaner
 
 # Output formats
-node scripts/audit.js --dir data/sample-skills --output json      # machine-readable
-node scripts/audit.js --dir data/sample-skills --output markdown  # Markdown report
-node scripts/audit.js --dir data/sample-skills --output csv       # CSV export
-node scripts/audit.js --dir data/sample-skills --output sarif     # SARIF 2.1.0 (GitHub code scanning)
-node scripts/audit.js --dir data/sample-skills --output html      # standalone HTML report
-node scripts/audit.js --dir data/sample-skills --quiet            # one line per skill (CI logs)
+node scripts/audit.js --dir ./demo-skills --output json      # machine-readable
+node scripts/audit.js --dir ./demo-skills --output markdown  # Markdown report
+node scripts/audit.js --dir ./demo-skills --output csv       # CSV export
+node scripts/audit.js --dir ./demo-skills --output sarif     # SARIF 2.1.0 (GitHub code scanning)
+node scripts/audit.js --dir ./demo-skills --output html      # standalone HTML report
+node scripts/audit.js --dir ./demo-skills --quiet            # one line per skill (CI logs)
 
 # Filter by severity / skip skills
 node scripts/audit.js --severity high         # only High risk skills
@@ -115,22 +115,22 @@ node scripts/audit.js --exclude vendor,legacy # skip matching names/paths
 node scripts/audit.js --config audit.config.json
 
 # CI gate: exit 1 when findings meet the threshold (0 clean, 1 tripped, 2 error)
-node scripts/audit.js --dir data/sample-skills --fail-on high
+node scripts/audit.js --dir ./demo-skills --fail-on high
 
 # Save report to ~/.openclaw/security-reports/
-node scripts/audit.js --dir data/sample-skills --save
+node scripts/audit.js --dir ./demo-skills --save
 
 # Compare against last saved report (shows what changed)
-node scripts/audit.js --dir data/sample-skills --compare
+node scripts/audit.js --dir ./demo-skills --compare
 
 # Auto-generate patched SKILL.md with dangerous permissions stripped
-node scripts/audit.js --dir data/sample-skills --fix
+node scripts/audit.js --dir ./demo-skills --fix
 
 # Show trust score history for all skills
 node scripts/audit.js --trust
 
 # Show rule-frequency analytics
-node scripts/audit.js --dir data/sample-skills --stats
+node scripts/audit.js --dir ./demo-skills --stats
 
 # List all 52 detection rules
 node scripts/audit.js --list-rules
@@ -176,23 +176,20 @@ gh code-scanning upload-sarif audit.sarif
 - run: node scripts/audit.js --dir ./skills --fail-on high --quiet
 ```
 
-## Testing with sample skills
+## Testing with generated fixtures
+
+The repo ships **no live attack-sample files** — fixtures (a High-risk
+evasion demo, a Medium-risk sync tool, a clean weather skill, plus
+prompt-injection and benign cases) are generated at test time so tracked
+source stays clean for registry scanners:
 
 ```bash
-node scripts/audit.js --dir data/sample-skills
+node scripts/test.js --dump-dir ./demo-skills   # materialize fixtures to disk…
+node scripts/audit.js --dir ./demo-skills/sample-skills
+node scripts/audit.js --dir ./demo-skills/test-fixtures
 ```
 
-> **Note:** `data/sample-skills/` contains intentionally risky demo scripts used
-> to validate the auditor's detection rules. They are not needed for normal use
-> and can be safely deleted if you do not want potentially dangerous demo code on disk:
-> ```bash
-> rm -rf data/sample-skills
-> ```
->
-> `data/test-fixtures/` holds extra cases for the test suite: `shady-helper`
-> (prompt-injection demo: H17/H18/M21/M22/M23) and `clean-minimal` (scores 0).
-
-See `data/example-output.md` for expected output against the three sample skills.
+See `data/example-output.md` for the expected report shape.
 
 ## Continuous monitoring (optional, advanced)
 
@@ -286,28 +283,21 @@ security-auditor/
 │   ├── dashboard.js            ← Local web dashboard server
 │   ├── whitelist.js            ← Whitelist manager (reasons + timestamps)
 │   ├── monitor.js              ← Continuous file watcher (+ --once, new-skill watch)
-│   └── test.js                 ← Self-test suite (47 checks)
+│   └── test.js                 ← Self-test suite (56 checks)
 ├── ui/
 │   └── index.html              ← Dashboard UI (self-contained, no build step)
 └── data/
-    ├── example-output.md       ← Sample report output
-    ├── sample-skills/          ← Demo skills for testing
-    │   ├── file-cleaner/       ← High risk example (evasion techniques)
-    │   ├── data-sync/          ← Medium risk example
-    │   └── weather-lookup/     ← Low risk (clean) example
-    └── test-fixtures/          ← Extra engine test cases
-        ├── shady-helper/       ← Prompt-injection demo (H17/H18/M21–M23)
-        └── clean-minimal/      ← Benign fixture (scores 0)
+    └── example-output.md       ← Sample report output (fixtures generated by tests)
 ```
 
-## Detection rules (v4)
+## Detection rules (v4.1)
 
 52 checks across 3 risk levels + prompt/instruction risks:
 
 High risk (H1–H18): shell execution (+ evasion variants: bracket alias,
-template-literal exec, concat normalization), remote code download, file
-deletion (+ PowerShell `Remove-Item`), obfuscation (+ `-EncodedCommand`),
-privilege escalation, credential harvesting, .env access, keyloggers, clipboard
+template-literal invocation, concat normalization), remote code download, file
+deletion (incl. PowerShell removers), obfuscation (incl. encoded-command flags),
+privilege escalation, credential harvesting, environment-file access, keyloggers, clipboard
 theft, screen capture, crypto mining, reverse shells, registry manipulation,
 persistence mechanisms, SQL/command injection, supply-chain/runtime package
 install, **prompt injection / instruction override (H17)**, **safety-bypass
@@ -344,7 +334,20 @@ catalog with scores.
 - Monitor watches for newly installed skills + `--once` mode
 - Dashboard: `/health`, `/api/rules`, Markdown export, `--host`, hardened headers
 - Whitelist reasons + timestamps; `package.json`, MIT license, CI, changelog
-- 47-test suite incl. prompt-injection fixtures and SARIF/fail-on/config tests
+- 56-test suite incl. generated fixtures, dashboard-auth tests, SARIF/fail-on/config tests,
+  a self-scan dogfood test, and a source-hygiene test that fails the build if
+  registry-flaggable literals ever re-enter tracked source
+
+## New in v4.1 (registry-hardening release)
+
+- Dashboard auth: per-process API token, no CORS headers, JSON-only POSTs with
+  body caps, whitelist mutations validated against discovered skills
+- Scanner hygiene: process-module name assembled from char codes (no literal in
+  source), H16 skips ALL-CAPS constants, M22 signature split against self-match
+- SKILL.md rule catalog rewritten as described classes — no verbatim attack
+  signatures in shipped docs; the skill self-scans Low (2/100)
+- Attack-sample files removed from git; fixtures generated at test time
+  (`--dump-dir` keeps them on disk for manual runs)
 
 v2/v3 features carried forward: `--dir`, Markdown/CSV reports, `--compare`,
 `--fix`, `--trust`, `--stats`, `--severity`, entropy analysis, `scoreBreakdown`

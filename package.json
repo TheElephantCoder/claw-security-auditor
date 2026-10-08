@@ -1,6 +1,6 @@
 {
   "name": "claw-security-auditor",
-  "version": "4.0.0",
+  "version": "4.1.0",
   "description": "Autonomously scans installed OpenClaw skills for security risks (shell execution, file deletion, remote code download, exfiltration, obfuscation, prompt injection). Zero dependencies.",
   "type": "commonjs",
   "main": "./scripts/audit.js",

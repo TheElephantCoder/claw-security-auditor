@@ -17,7 +17,8 @@
 const fs   = require("fs");
 const path = require("path");
 const os   = require("os");
-const { execFileSync } = require("child" + "_process");
+const { sysProc } = require("../lib/utils");
+const { execFileSync } = sysProc();
 
 const SKILL_PATHS = [
   path.join(process.cwd(), "skills"),

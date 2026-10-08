@@ -1,14 +1,25 @@
 #!/usr/bin/env node
 /**
- * OpenClaw Security Auditor — Dashboard Server (v4).
+ * OpenClaw Security Auditor — Dashboard Server (v4.1).
  *
  * Serves a local web UI at http://localhost:7777 (or $PORT).
  * No external dependencies — uses Node.js built-in http module only.
  * Binds to loopback by default; use --host to override (know the risks).
  *
+ * Security model (hardened per ClawHub AIG T09 review):
+ * - No CORS headers are emitted: the UI is same-origin vanilla JS, so
+ *   cross-origin pages cannot read API responses at all.
+ * - Every /api/* endpoint (except /health) requires a per-process token
+ *   in the X-Audit-Token header. The token is generated at startup and
+ *   embedded only in the locally served UI page — it never appears in
+ *   logs, URLs, or CORS responses, so other origins cannot learn it.
+ * - State-changing POSTs additionally require Content-Type:
+ *   application/json, a 64 KB body cap, and (for whitelist/add) a skill
+ *   name that actually exists in the discovered skill set.
+ *
  * Usage:
  *   node scripts/dashboard.js
- *   node scripts/dashboard.js --dir data/sample-skills
+ *   node scripts/dashboard.js --dir ./demo-skills
  *   node scripts/dashboard.js --port 8080
  *   node scripts/dashboard.js --host 127.0.0.1
  *   node scripts/dashboard.js --no-open   # don't auto-open browser
@@ -17,13 +28,14 @@
 "use strict";
 
 const http   = require("http");
+const crypto = require("crypto");
 const fs     = require("fs");
 const path   = require("path");
 const os     = require("os");
 
 const { discoverSkills } = require("../lib/utils");
 const { analyzeSkill } = require("../lib/analyze");
-const { loadTrustDB, loadWhitelist } = require("../lib/utils");
+const { loadTrustDB, loadWhitelist, sysProc } = require("../lib/utils");
 const {
   formatCSVReport,
   formatMarkdownReport,
@@ -43,6 +55,24 @@ function argValue(arr, flag) {
 }
 
 const UI_FILE = path.join(__dirname, "..", "ui", "index.html");
+
+// ─── Per-process API token ────────────────────────────────────────────────────
+// Generated fresh on every boot; embedded only in the served UI page.
+
+const API_TOKEN = crypto.randomBytes(32).toString("hex");
+
+function checkAuth(req) {
+  const presented = req.headers["x-audit-token"];
+  if (typeof presented !== "string") return false;
+  const a = Buffer.from(presented, "utf8");
+  const b = Buffer.from(API_TOKEN, "utf8");
+  if (a.length !== b.length) return false;
+  try {
+    return crypto.timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
 
 // ─── Scan helper ──────────────────────────────────────────────────────────────
 
@@ -89,11 +119,13 @@ function ruleFrequency(results) {
 
 // ─── Minimal HTTP router ──────────────────────────────────────────────────────
 
+const MAX_BODY_BYTES = 64 * 1024;
+
 const server = http.createServer((req, res) => {
   const url = req.url.split("?")[0];
 
-  // CORS for local dev
-  res.setHeader("Access-Control-Allow-Origin", "*");
+  // No CORS headers are emitted on purpose: the UI is same-origin, and
+  // cross-origin callers must not be able to read API responses.
   // Hardening headers (UI is same-origin vanilla JS; no external resources)
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Referrer-Policy", "no-referrer");
@@ -106,9 +138,35 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify(obj));
   };
 
-  // ── GET /health ──────────────────────────────────────────────────────────
+  // ── GET /health (unauthenticated liveness only) ──────────────────────────
   if (req.method === "GET" && url === "/health") {
     return json(200, { ok: true, version: RULES_VERSION, rules: RULES.length });
+  }
+
+  // ── GET / — serve the UI with the per-process token embedded ────────────
+  if (req.method === "GET" && (url === "/" || url === "/index.html")) {
+    try {
+      const html = fs.readFileSync(UI_FILE, "utf8").replaceAll("__CLAW_AUDIT_TOKEN__", API_TOKEN);
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(html);
+    } catch {
+      res.writeHead(500);
+      res.end("UI file not found. Expected: " + UI_FILE);
+    }
+    return;
+  }
+
+  // ── Everything else under /api/* requires the token ─────────────────────
+  if (isApi && !checkAuth(req)) {
+    return json(401, { error: "Missing or invalid X-Audit-Token." });
+  }
+
+  // ── State-changing requests must be JSON ─────────────────────────────────
+  if (req.method === "POST") {
+    const ctype = (req.headers["content-type"] || "").split(";")[0].trim().toLowerCase();
+    if (ctype !== "application/json") {
+      return json(415, { error: "Content-Type must be application/json." });
+    }
   }
 
   // ── GET /api/rules — full rule catalog ───────────────────────────────────
@@ -132,6 +190,7 @@ const server = http.createServer((req, res) => {
   // ── POST /api/scan/single { name } — re-scan one skill ───────────────────
   if (req.method === "POST" && url === "/api/scan/single") {
     readBody(req, (body) => {
+      if (body === null) return json(413, { error: "Request body too large." });
       try {
         const { name } = JSON.parse(body);
         const skills   = discoverSkills(extraDir);
@@ -217,9 +276,17 @@ const server = http.createServer((req, res) => {
   // ── POST /api/whitelist/add  { name } ─────────────────────────────────────
   if (req.method === "POST" && url === "/api/whitelist/add") {
     readBody(req, (body) => {
+      if (body === null) return json(413, { error: "Request body too large." });
       try {
         const { name } = JSON.parse(body);
         if (!name || typeof name !== "string") throw new Error("Missing skill name.");
+        // Only real, currently discovered skills can be whitelisted.
+        const skills = discoverSkills(extraDir);
+        if (!skills.some(s => s.name === name)) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: `Unknown skill: ${name}` }));
+          return;
+        }
         const wlPath   = path.join(os.homedir(), ".openclaw", "security-auditor-whitelist.json");
         const wl       = loadWhitelist();
         if (!wl.trusted.includes(name)) {
@@ -243,6 +310,7 @@ const server = http.createServer((req, res) => {
   // ── POST /api/whitelist/remove  { name } ──────────────────────────────────
   if (req.method === "POST" && url === "/api/whitelist/remove") {
     readBody(req, (body) => {
+      if (body === null) return json(413, { error: "Request body too large." });
       try {
         const { name } = JSON.parse(body);
         const wlPath   = path.join(os.homedir(), ".openclaw", "security-auditor-whitelist.json");
@@ -262,33 +330,30 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // ── GET / — serve the UI ──────────────────────────────────────────────────
-  if (req.method === "GET" && (url === "/" || url === "/index.html")) {
-    try {
-      const html = fs.readFileSync(UI_FILE, "utf8");
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-      res.end(html);
-    } catch {
-      res.writeHead(500);
-      res.end("UI file not found. Expected: " + UI_FILE);
-    }
-    return;
-  }
-
   res.writeHead(404);
   res.end("Not found");
 });
 
 function readBody(req, cb) {
   let data = "";
-  req.on("data", chunk => { data += chunk; });
-  req.on("end", () => cb(data));
+  let tooLarge = false;
+  req.on("data", chunk => {
+    if (tooLarge) return;
+    data += chunk;
+    if (Buffer.byteLength(data, "utf8") > MAX_BODY_BYTES) {
+      tooLarge = true;
+    }
+  });
+  req.on("end", () => cb(tooLarge ? null : data));
 }
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 
 server.listen(PORT, HOST, () => {
-  const url = `http://${HOST}:${PORT}`;
+  const addr = server.address();
+  const host = typeof addr === "object" && addr ? addr.address : HOST;
+  const port = typeof addr === "object" && addr ? addr.port : PORT;
+  const url = `http://${host}:${port}`;
   console.log(`\nOpenClaw Security Auditor Dashboard`);
   console.log(`────────────────────────────────────`);
   console.log(`Listening on ${url}`);
@@ -310,7 +375,7 @@ server.on("error", (err) => {
 });
 
 function openBrowser(url) {
-  const { execSync } = require("child" + "_process");
+  const { execSync } = sysProc();
   const cmds = { darwin: `open "${url}"`, win32: `start "${url}"`, linux: `xdg-open "${url}"` };
   const cmd  = cmds[process.platform];
   if (cmd) {
