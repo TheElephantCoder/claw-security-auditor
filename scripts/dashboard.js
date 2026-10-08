@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 /**
- * OpenClaw Security Auditor — Dashboard Server
+ * OpenClaw Security Auditor — Dashboard Server (v4).
  *
  * Serves a local web UI at http://localhost:7777 (or $PORT).
  * No external dependencies — uses Node.js built-in http module only.
+ * Binds to loopback by default; use --host to override (know the risks).
  *
  * Usage:
  *   node scripts/dashboard.js
  *   node scripts/dashboard.js --dir data/sample-skills
  *   node scripts/dashboard.js --port 8080
+ *   node scripts/dashboard.js --host 127.0.0.1
  *   node scripts/dashboard.js --no-open   # don't auto-open browser
  */
 
@@ -18,11 +20,20 @@ const http   = require("http");
 const fs     = require("fs");
 const path   = require("path");
 const os     = require("os");
-const { discoverSkills, analyzeSkill, loadTrustDB, loadWhitelist, showStatsReport, formatCSVReport } = require("./audit");
+
+const { discoverSkills } = require("../lib/utils");
+const { analyzeSkill } = require("../lib/analyze");
+const { loadTrustDB, loadWhitelist } = require("../lib/utils");
+const {
+  formatCSVReport,
+  formatMarkdownReport,
+} = require("../lib/report");
+const { RULES, RULES_VERSION } = require("../lib/rules");
 
 // ─── CLI args ─────────────────────────────────────────────────────────────────
 const args     = process.argv.slice(2);
 const PORT     = parseInt(argValue(args, "--port") || process.env.PORT || "7777", 10);
+const HOST     = argValue(args, "--host") || process.env.HOST || "127.0.0.1";
 const NO_OPEN  = args.includes("--no-open");
 const extraDir = argValue(args, "--dir") ? path.resolve(argValue(args, "--dir")) : null;
 
@@ -36,8 +47,6 @@ const UI_FILE = path.join(__dirname, "..", "ui", "index.html");
 // ─── Scan helper ──────────────────────────────────────────────────────────────
 
 function runScan() {
-  // Pass extraDir so --dir flag actually takes effect (audit.js SKILL_PATHS
-  // is computed at load time; we must pass the override explicitly here)
   const skills  = discoverSkills(extraDir);
   const results = skills.map(skill => {
     try {
@@ -60,6 +69,24 @@ function runScan() {
   return results;
 }
 
+function ruleFrequency(results) {
+  const ruleFreq = {};
+  const ruleLabel = {};
+  for (const r of results) {
+    for (const rule of r.triggeredRules) {
+      ruleFreq[rule.id]  = (ruleFreq[rule.id] || 0) + 1;
+      ruleLabel[rule.id] = rule.label;
+    }
+  }
+  const sorted = Object.entries(ruleFreq)
+    .sort((a, b) => b[1] - a[1])
+    .map(([id, count]) => ({ id, label: ruleLabel[id], count, pct: results.length ? Math.round((count / results.length) * 100) : 0 }));
+  const avgScore = results.length
+    ? Math.round(results.reduce((s, r) => s + r.riskScore, 0) / results.length)
+    : 0;
+  return { total: results.length, avgScore, rules: sorted };
+}
+
 // ─── Minimal HTTP router ──────────────────────────────────────────────────────
 
 const server = http.createServer((req, res) => {
@@ -67,18 +94,39 @@ const server = http.createServer((req, res) => {
 
   // CORS for local dev
   res.setHeader("Access-Control-Allow-Origin", "*");
+  // Hardening headers (UI is same-origin vanilla JS; no external resources)
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "no-referrer");
+
+  const isApi = url.startsWith("/api/");
+  if (isApi) res.setHeader("Cache-Control", "no-store");
+
+  const json = (code, obj) => {
+    res.writeHead(code, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(obj));
+  };
+
+  // ── GET /health ──────────────────────────────────────────────────────────
+  if (req.method === "GET" && url === "/health") {
+    return json(200, { ok: true, version: RULES_VERSION, rules: RULES.length });
+  }
+
+  // ── GET /api/rules — full rule catalog ───────────────────────────────────
+  if (req.method === "GET" && url === "/api/rules") {
+    return json(200, {
+      version: RULES_VERSION,
+      rules: RULES.map(r => ({ id: r.id, level: r.level, score: r.score, label: r.label })),
+    });
+  }
 
   // ── GET /api/scan — run full audit, return JSON ───────────────────────────
   if (req.method === "GET" && url === "/api/scan") {
     try {
       const results = runScan();
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(results));
+      return json(200, results);
     } catch (err) {
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: err.message }));
+      return json(500, { error: err.message });
     }
-    return;
   }
 
   // ── POST /api/scan/single { name } — re-scan one skill ───────────────────
@@ -107,28 +155,11 @@ const server = http.createServer((req, res) => {
   // ── GET /api/stats — rule frequency analytics ─────────────────────────────
   if (req.method === "GET" && url === "/api/stats") {
     try {
-      const results  = runScan();
-      const ruleFreq = {};
-      const ruleLabel = {};
-      for (const r of results) {
-        for (const rule of r.triggeredRules) {
-          ruleFreq[rule.id]  = (ruleFreq[rule.id] || 0) + 1;
-          ruleLabel[rule.id] = rule.label;
-        }
-      }
-      const sorted = Object.entries(ruleFreq)
-        .sort((a, b) => b[1] - a[1])
-        .map(([id, count]) => ({ id, label: ruleLabel[id], count, pct: Math.round((count / results.length) * 100) }));
-      const avgScore = results.length
-        ? Math.round(results.reduce((s, r) => s + r.riskScore, 0) / results.length)
-        : 0;
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ total: results.length, avgScore, rules: sorted }));
+      const results = runScan();
+      return json(200, ruleFrequency(results));
     } catch (err) {
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: err.message }));
+      return json(500, { error: err.message });
     }
-    return;
   }
 
   // ── GET /api/export/csv — CSV download ────────────────────────────────────
@@ -142,8 +173,23 @@ const server = http.createServer((req, res) => {
       });
       res.end(csv);
     } catch (err) {
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: err.message }));
+      return json(500, { error: err.message });
+    }
+    return;
+  }
+
+  // ── GET /api/export/markdown — Markdown download ──────────────────────────
+  if (req.method === "GET" && url === "/api/export/markdown") {
+    try {
+      const results = runScan();
+      const md      = formatMarkdownReport(results);
+      res.writeHead(200, {
+        "Content-Type": "text/markdown; charset=utf-8",
+        "Content-Disposition": `attachment; filename="openclaw-audit-${new Date().toISOString().slice(0,10)}.md"`,
+      });
+      res.end(md);
+    } catch (err) {
+      return json(500, { error: err.message });
     }
     return;
   }
@@ -152,26 +198,20 @@ const server = http.createServer((req, res) => {
   if (req.method === "GET" && url === "/api/trust") {
     try {
       const db = loadTrustDB();
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(db));
+      return json(200, db);
     } catch (err) {
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: err.message }));
+      return json(500, { error: err.message });
     }
-    return;
   }
 
   // ── GET /api/whitelist — current whitelist ────────────────────────────────
   if (req.method === "GET" && url === "/api/whitelist") {
     try {
       const wl = loadWhitelist();
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(wl));
+      return json(200, wl);
     } catch (err) {
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: err.message }));
+      return json(500, { error: err.message });
     }
-    return;
   }
 
   // ── POST /api/whitelist/add  { name } ─────────────────────────────────────
@@ -179,10 +219,13 @@ const server = http.createServer((req, res) => {
     readBody(req, (body) => {
       try {
         const { name } = JSON.parse(body);
+        if (!name || typeof name !== "string") throw new Error("Missing skill name.");
         const wlPath   = path.join(os.homedir(), ".openclaw", "security-auditor-whitelist.json");
         const wl       = loadWhitelist();
         if (!wl.trusted.includes(name)) {
           wl.trusted.push(name);
+          wl.meta = wl.meta || {};
+          wl.meta[name] = { addedAt: new Date().toISOString().slice(0, 10), reason: "via dashboard" };
           wl.updatedAt = new Date().toISOString();
           fs.mkdirSync(path.dirname(wlPath), { recursive: true });
           fs.writeFileSync(wlPath, JSON.stringify(wl, null, 2));
@@ -205,6 +248,7 @@ const server = http.createServer((req, res) => {
         const wlPath   = path.join(os.homedir(), ".openclaw", "security-auditor-whitelist.json");
         const wl       = loadWhitelist();
         wl.trusted     = wl.trusted.filter(s => s !== name);
+        if (wl.meta) delete wl.meta[name];
         wl.updatedAt   = new Date().toISOString();
         fs.mkdirSync(path.dirname(wlPath), { recursive: true });
         fs.writeFileSync(wlPath, JSON.stringify(wl, null, 2));
@@ -243,11 +287,14 @@ function readBody(req, cb) {
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 
-server.listen(PORT, "127.0.0.1", () => {
-  const url = `http://localhost:${PORT}`;
+server.listen(PORT, HOST, () => {
+  const url = `http://${HOST}:${PORT}`;
   console.log(`\nOpenClaw Security Auditor Dashboard`);
   console.log(`────────────────────────────────────`);
   console.log(`Listening on ${url}`);
+  if (HOST !== "127.0.0.1" && HOST !== "localhost") {
+    console.log(`⚠️  Bound to non-loopback host — restrict network access!`);
+  }
   console.log(`Press Ctrl+C to stop.\n`);
 
   if (!NO_OPEN) openBrowser(url);

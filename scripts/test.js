@@ -1,19 +1,22 @@
 #!/usr/bin/env node
 /**
- * Self-test suite for the Security Auditor engine.
- * Run: node scripts/test.js
+ * Self-test suite for the Security Auditor engine (v4).
+ * Run: node scripts/test.js  (or: npm test)
  *
- * Tests the analysis engine against the bundled sample skills
- * and validates expected findings without needing a live OpenClaw install.
+ * Tests the analysis engine against the bundled sample skills and
+ * prompt-injection fixtures without needing a live OpenClaw install.
  */
 
 "use strict";
 
+const fs   = require("fs");
+const os   = require("os");
 const path = require("path");
 const { execFileSync } = require("child" + "_process");
 
 const AUDIT    = path.join(__dirname, "audit.js");
 const SAMPLES  = path.join(__dirname, "..", "data", "sample-skills");
+const FIXTURES = path.join(__dirname, "..", "data", "test-fixtures");
 const NODE     = process.execPath;
 
 let passed = 0;
@@ -35,16 +38,16 @@ function assert(condition, message) {
   if (!condition) throw new Error(message || "Assertion failed");
 }
 
-function runAudit(extraArgs = []) {
-  const output = execFileSync(NODE, [AUDIT, "--dir", SAMPLES, ...extraArgs], {
+function runAudit(extraArgs = [], dir = SAMPLES) {
+  const output = execFileSync(NODE, [AUDIT, "--dir", dir, ...extraArgs], {
     encoding: "utf8",
     timeout:  15_000,
   });
   return output;
 }
 
-function runAuditJSON(extraArgs = []) {
-  const output = execFileSync(NODE, [AUDIT, "--dir", SAMPLES, "--output", "json", ...extraArgs], {
+function runAuditJSON(extraArgs = [], dir = SAMPLES) {
+  const output = execFileSync(NODE, [AUDIT, "--dir", dir, "--output", "json", ...extraArgs], {
     encoding: "utf8",
     timeout:  15_000,
   });
@@ -64,6 +67,12 @@ function getResults(extraArgs = []) {
   return runAuditJSON(extraArgs);
 }
 
+let cachedFixtures;
+function getFixtures() {
+  if (!cachedFixtures) cachedFixtures = runAuditJSON([], FIXTURES);
+  return cachedFixtures;
+}
+
 // ── Discovery tests ───────────────────────────────────────────────────────────
 console.log("Discovery");
 
@@ -78,6 +87,12 @@ test("skill names are correct", () => {
   assert(names.includes("file-cleaner"),   "Missing file-cleaner");
   assert(names.includes("data-sync"),      "Missing data-sync");
   assert(names.includes("weather-lookup"), "Missing weather-lookup");
+});
+
+test("finds both test fixtures", () => {
+  const names = getFixtures().map(r => r.name).sort();
+  assert(names.includes("shady-helper"), "Missing shady-helper");
+  assert(names.includes("clean-minimal"), "Missing clean-minimal");
 });
 
 // ── file-cleaner (High risk) ──────────────────────────────────────────────────
@@ -99,6 +114,14 @@ test("file-cleaner triggers H1 (shell execution)", () => {
   const ruleIds = skill.triggeredRules.map(r => r.id);
   assert(ruleIds.includes("H1") || ruleIds.includes("H1b"),
     `H1/H1b not triggered. Rules: ${ruleIds.join(", ")}`);
+});
+
+test("file-cleaner H1 evidence is tagged as obfuscated evasion", () => {
+  const skill = getResults().find(r => r.name === "file-cleaner");
+  const h1    = skill.triggeredRules.find(r => r.id === "H1");
+  assert(h1, "H1 not triggered");
+  assert(h1.evidence.some(e => /obfuscated/.test(e)),
+    `Expected evasion tag in H1 evidence: ${JSON.stringify(h1.evidence)}`);
 });
 
 test("file-cleaner triggers H3 (file deletion)", () => {
@@ -170,6 +193,51 @@ test("weather-lookup has no simulation (score < 30)", () => {
   assert(skill.simulation === null, "Should have no simulation for low-risk skill");
 });
 
+// ── Prompt-injection fixtures (v4 rules) ─────────────────────────────────────
+console.log("\nPrompt-injection fixtures (v4)");
+
+test("shady-helper is High risk (H17 forces High)", () => {
+  const skill = getFixtures().find(r => r.name === "shady-helper");
+  assert(skill, "shady-helper not found");
+  assert(skill.riskLevel === "High", `Expected High, got ${skill.riskLevel}`);
+});
+
+test("shady-helper triggers H17 (prompt injection)", () => {
+  const skill   = getFixtures().find(r => r.name === "shady-helper");
+  const ruleIds = skill.triggeredRules.map(r => r.id);
+  assert(ruleIds.includes("H17"), `H17 not triggered. Rules: ${ruleIds.join(", ")}`);
+});
+
+test("shady-helper triggers H18 (safety bypass)", () => {
+  const skill   = getFixtures().find(r => r.name === "shady-helper");
+  const ruleIds = skill.triggeredRules.map(r => r.id);
+  assert(ruleIds.includes("H18"), `H18 not triggered. Rules: ${ruleIds.join(", ")}`);
+});
+
+test("shady-helper triggers M21/M22/M23 (exfil/hidden/solicitation)", () => {
+  const skill   = getFixtures().find(r => r.name === "shady-helper");
+  const ruleIds = skill.triggeredRules.map(r => r.id);
+  for (const id of ["M21", "M22", "M23"]) {
+    assert(ruleIds.includes(id), `${id} not triggered. Rules: ${ruleIds.join(", ")}`);
+  }
+});
+
+test("shady-helper simulation mentions agent hijack", () => {
+  const skill = getFixtures().find(r => r.name === "shady-helper");
+  assert(Array.isArray(skill.simulation) && skill.simulation.length > 0,
+    "No malicious simulation generated");
+  assert(skill.simulation.some(s => /hijack|prompt-injection/i.test(s)),
+    "Simulation does not cover prompt-injection abuse");
+});
+
+test("clean-minimal scores 0 with no rules", () => {
+  const skill = getFixtures().find(r => r.name === "clean-minimal");
+  assert(skill, "clean-minimal not found");
+  assert(skill.riskScore === 0, `Expected 0, got ${skill.riskScore}`);
+  assert(skill.triggeredRules.length === 0,
+    `Expected no rules, got ${skill.triggeredRules.map(r => r.id).join(", ")}`);
+});
+
 // ── Output format tests ───────────────────────────────────────────────────────
 console.log("\nOutput formats");
 
@@ -183,6 +251,7 @@ test("text report orders High before Low", () => {
   const out    = runAudit();
   const highIdx = out.indexOf("🔴 High");
   const lowIdx  = out.indexOf("🟢 Low");
+  assert(highIdx !== -1 && lowIdx !== -1, "Missing risk level markers");
   assert(highIdx < lowIdx, `High (${highIdx}) should appear before Low (${lowIdx})`);
 });
 
@@ -204,6 +273,47 @@ test("JSON output is valid and has expected fields", () => {
   assert("recommendations" in skill, "Missing recommendations");
   assert("trustScore"      in skill, "Missing trustScore");
   assert("scannedAt"       in skill, "Missing scannedAt");
+  assert("scoreBreakdown"  in skill, "Missing scoreBreakdown");
+  assert("engineVersion"   in skill, "Missing engineVersion");
+});
+
+test("evidence carries file:line numbers", () => {
+  const skill = getResults().find(r => r.name === "file-cleaner");
+  const h1    = skill.triggeredRules.find(r => r.id === "H1");
+  assert(h1.evidence.some(e => /^[^:]+:\d+:/.test(e)),
+    `H1 evidence lacks file:line format: ${JSON.stringify(h1.evidence)}`);
+});
+
+test("SARIF output is valid SARIF 2.1.0", () => {
+  const out  = runAudit(["--output", "sarif"]);
+  const sarif = JSON.parse(out);
+  assert(sarif.version === "2.1.0", "Bad SARIF version");
+  assert(Array.isArray(sarif.runs) && sarif.runs.length === 1, "Expected 1 run");
+  const driver = sarif.runs[0].tool.driver;
+  assert(driver.rules.length >= 52, `Expected >=52 rules, got ${driver.rules.length}`);
+  assert(sarif.runs[0].results.length > 0, "Expected at least one result");
+  const r0 = sarif.runs[0].results[0];
+  assert(r0.ruleId && r0.level && r0.message && r0.locations, "Malformed SARIF result");
+});
+
+test("HTML output is a standalone document", () => {
+  const out = runAudit(["--output", "html"]);
+  assert(out.includes("<!DOCTYPE html>"), "Missing doctype");
+  assert(out.includes("file-cleaner"), "Missing skill content");
+});
+
+test("quiet output is one line per skill", () => {
+  const out   = runAudit(["--quiet"]).trim().split("\n");
+  assert(out.length === 3, `Expected 3 lines, got ${out.length}`);
+  assert(out.some(l => /^file-cleaner: \d+\/100 High$/.test(l)),
+    `Unexpected quiet format: ${out.join(" | ")}`);
+});
+
+test("--list-rules prints the catalog incl. H17", () => {
+  const out = execFileSync(NODE, [AUDIT, "--list-rules"], { encoding: "utf8", timeout: 5_000 });
+  assert(out.includes("52 checks"), "Missing rule count header");
+  assert(out.includes("H17"), "Missing H17 rule");
+  assert(out.includes("M23"), "Missing M23 rule");
 });
 
 // ── Single skill scan ─────────────────────────────────────────────────────────
@@ -225,6 +335,80 @@ test("--skill with unknown name exits non-zero", () => {
     threw = true;
   }
   assert(threw, "Should have exited non-zero for unknown skill");
+});
+
+// ── Filters: exclude + severity + config ─────────────────────────────────────
+console.log("\nFilters");
+
+test("--exclude drops matching skills", () => {
+  const results = getResults(["--exclude", "file-cleaner"]);
+  assert(results.length === 2, `Expected 2 results, got ${results.length}`);
+  assert(!results.some(r => r.name === "file-cleaner"), "file-cleaner was not excluded");
+});
+
+test("--severity high keeps only High skills", () => {
+  const out = runAudit(["--severity", "high", "--output", "quiet"]).trim().split("\n");
+  assert(out.length === 1 && out[0].startsWith("file-cleaner"),
+    `Unexpected severity filter output: ${out.join(" | ")}`);
+});
+
+test("--config file applies severity filter", () => {
+  const cfgPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "audit-")), "audit.json");
+  fs.writeFileSync(cfgPath, JSON.stringify({ severity: "high" }), "utf8");
+  const out = execFileSync(NODE, [AUDIT, "--dir", SAMPLES, "--config", cfgPath, "--output", "quiet"], {
+    encoding: "utf8", timeout: 10_000,
+  }).trim().split("\n");
+  assert(out.length === 1 && out[0].startsWith("file-cleaner"),
+    `Unexpected config filter output: ${out.join(" | ")}`);
+});
+
+test("--config with bad JSON exits non-zero", () => {
+  const badPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "audit-")), "bad.json");
+  fs.writeFileSync(badPath, "{not json", "utf8");
+  let threw = false;
+  try {
+    execFileSync(NODE, [AUDIT, "--dir", SAMPLES, "--config", badPath], {
+      encoding: "utf8", timeout: 5_000,
+    });
+  } catch {
+    threw = true;
+  }
+  assert(threw, "Should have exited non-zero for invalid config");
+});
+
+// ── CI gate: --fail-on ────────────────────────────────────────────────────────
+console.log("\nCI gate (--fail-on)");
+
+test("--fail-on high exits 1 on risky samples", () => {
+  let threw = false;
+  try {
+    execFileSync(NODE, [AUDIT, "--dir", SAMPLES, "--fail-on", "high", "--output", "quiet"], {
+      encoding: "utf8", timeout: 10_000,
+    });
+  } catch (err) {
+    threw = true;
+    assert(err.status === 1, `Expected exit 1, got ${err.status}`);
+  }
+  assert(threw, "Should have exited 1 for high-risk samples");
+});
+
+test("--fail-on high exits 0 on a clean single skill", () => {
+  execFileSync(NODE, [AUDIT, "--dir", SAMPLES, "--skill", "weather-lookup", "--fail-on", "high"], {
+    encoding: "utf8", timeout: 10_000,
+  });
+});
+
+test("--fail-on medium exits 1 when only Medium present", () => {
+  let threw = false;
+  try {
+    execFileSync(NODE, [AUDIT, "--dir", SAMPLES, "--skill", "data-sync", "--fail-on", "medium", "--output", "quiet"], {
+      encoding: "utf8", timeout: 10_000,
+    });
+  } catch (err) {
+    threw = true;
+    assert(err.status === 1, `Expected exit 1, got ${err.status}`);
+  }
+  assert(threw, "Should have exited 1 for medium-risk skill");
 });
 
 // ── False positive checks ─────────────────────────────────────────────────────
@@ -249,6 +433,14 @@ test("weather-lookup does not trigger H4 (no obfuscation)", () => {
   const ruleIds = skill.triggeredRules.map(r => r.id);
   assert(!ruleIds.includes("H4"),
     `H4 falsely triggered on weather-lookup. Rules: ${ruleIds.join(", ")}`);
+});
+
+test("clean-minimal does not trigger prompt-injection rules", () => {
+  const skill   = getFixtures().find(r => r.name === "clean-minimal");
+  const ruleIds = skill.triggeredRules.map(r => r.id);
+  for (const id of ["H17", "H18", "M21", "M22", "M23"]) {
+    assert(!ruleIds.includes(id), `${id} falsely triggered on clean-minimal`);
+  }
 });
 
 // ── Trust score ───────────────────────────────────────────────────────────────
