@@ -18,19 +18,19 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
-      - name: Run self-test suite
-        run: node scripts/test.js
-      - name: Audit sample skills (text)
-        run: node scripts/audit.js --dir data/sample-skills
-      - name: Audit sample skills (SARIF, fail-open)
-        run: node scripts/audit.js --dir data/sample-skills --output sarif > /tmp/audit.sarif || true
+      - name: Run self-test suite (materializes fixtures)
+        run: node scripts/test.js --dump-dir ./demo-skills
+      - name: Audit generated fixtures (text)
+        run: node scripts/audit.js --dir ./demo-skills/sample-skills
+      - name: Audit generated fixtures (SARIF, fail-open)
+        run: node scripts/audit.js --dir ./demo-skills/sample-skills --output sarif > /tmp/audit.sarif || true
       - name: Validate SARIF is well-formed JSON
         run: node -e "const fs=require('fs'); const s=JSON.parse(fs.readFileSync('/tmp/audit.sarif','utf8')); if(s.version!=='2.1.0') throw new Error('bad sarif'); console.log('SARIF OK:', s.runs[0].results.length, 'results')"
       - name: List rules smoke test
         run: node scripts/audit.js --list-rules | head -n 5
       - name: CI gate smoke test (expect exit 1 on risky samples)
         run: |
-          if node scripts/audit.js --dir data/sample-skills --fail-on high --output quiet; then
+          if node scripts/audit.js --dir ./demo-skills/sample-skills --fail-on high --output quiet; then
             echo "ERROR: expected exit 1 for high-risk samples" && exit 1
           else
             echo "Gate correctly tripped on high-risk samples"
