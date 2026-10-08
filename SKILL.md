@@ -8,6 +8,9 @@ description: >
   report with mitigation recommendations.
   Use this when the user asks to audit skills, check for security risks,
   scan installed skills, or wants a security report.
+version: 4.0.0
+emoji: 🛡️
+homepage: https://github.com/TheElephantCoder/claw-security-auditor
 user-invocable: true
 runtime: node
 install: false

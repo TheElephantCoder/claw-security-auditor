@@ -25,6 +25,28 @@ No dependencies — pure Node.js stdlib (`node >= 18`). There is nothing to `npm
 node scripts/test.js   # run the self-test suite (47 checks, no network)
 ```
 
+## Publishing to ClawHub
+
+Build a clean, publish-ready skill folder (dev-only fixtures, sample
+skills, and CI config are excluded per `.clawhubignore` — the sample
+skills are intentionally risky demos and must not ship to the registry):
+
+```bash
+npm run pack
+# → dist/security-auditor/  (SKILL.md + lib/ + scripts/ + ui/ + docs)
+```
+
+Then publish with the ClawHub CLI:
+
+```bash
+clawhub login
+clawhub skill publish ./dist/security-auditor \
+  --slug security-auditor \
+  --version 4.0.0 \
+  --categories security,development \
+  --topics "security-scan,static-analysis,prompt-injection,sarif,skill-safety"
+```
+
 ## Dashboard (GUI)
 
 Run the local web dashboard for a visual risk overview:

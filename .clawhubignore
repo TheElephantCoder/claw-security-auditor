@@ -1,0 +1,11 @@
+# Files excluded from the published ClawHub bundle.
+# (Also enforced by scripts/pack.js when building dist/security-auditor/.)
+#
+# NOTE: never add a broad rule like `*.md` here — the ClawHub publisher
+# validates the bundle by looking for a root SKILL.md, and a broad Markdown
+# ignore would hide the manifest and fail the publish with "SKILL.md required".
+
+.github/
+data/sample-skills/
+data/test-fixtures/
+scripts/test.js

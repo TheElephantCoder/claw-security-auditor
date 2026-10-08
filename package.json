@@ -12,7 +12,8 @@
     "audit": "node scripts/audit.js",
     "dashboard": "node scripts/dashboard.js",
     "monitor": "node scripts/monitor.js",
-    "whitelist": "node scripts/whitelist.js"
+    "whitelist": "node scripts/whitelist.js",
+    "pack": "node scripts/pack.js"
   },
   "files": [
     "lib/",
