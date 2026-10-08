@@ -25,7 +25,7 @@ jobs:
       - name: Audit sample skills (SARIF, fail-open)
         run: node scripts/audit.js --dir data/sample-skills --output sarif > /tmp/audit.sarif || true
       - name: Validate SARIF is well-formed JSON
-        run: node -e "const s=require('/tmp/audit.sarif'); if(s.version!=='2.1.0') throw new Error('bad sarif'); console.log('SARIF OK:', s.runs[0].results.length, 'results')"
+        run: node -e "const fs=require('fs'); const s=JSON.parse(fs.readFileSync('/tmp/audit.sarif','utf8')); if(s.version!=='2.1.0') throw new Error('bad sarif'); console.log('SARIF OK:', s.runs[0].results.length, 'results')"
       - name: List rules smoke test
         run: node scripts/audit.js --list-rules | head -n 5
       - name: CI gate smoke test (expect exit 1 on risky samples)
