@@ -1,13 +1,11 @@
 ---
 name: security-auditor
 description: >
-  Autonomously scans all installed OpenClaw skills for security risks.
-  Detects dangerous behaviors like shell execution, file deletion, remote code
-  download, data exfiltration, and obfuscated logic. Assigns each skill a risk
-  score (0–100), risk level (Low/Medium/High), and generates a full security
-  report with mitigation recommendations.
-  Use this when the user asks to audit skills, check for security risks,
-  scan installed skills, or wants a security report.
+  Autonomously scans installed OpenClaw skills for security risks: shell
+  execution, file deletion, remote code download, data exfiltration,
+  obfuscated logic, prompt injection. Scores each skill 0–100
+  (Low/Medium/High) and outputs a full report. Use to audit skills or check
+  security risks.
 version: 4.1.0
 emoji: 🛡️
 homepage: https://github.com/TheElephantCoder/claw-security-auditor
